@@ -1,6 +1,5 @@
 FROM python:3.11-slim
 
-# Install Chromium and its dependencies
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
@@ -37,4 +36,5 @@ RUN playwright install chromium
 
 COPY app.py .
 
-CMD ["python", "app.py"]
+# Use Gunicorn (production server) on the port Render provides
+CMD ["gunicorn", "-b", "0.0.0.0:10000", "app:app"]
